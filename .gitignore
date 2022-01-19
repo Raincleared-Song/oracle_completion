@@ -1,0 +1,10 @@
+.idea/
+__pycache__/
+checkpoint/
+data_sharpen/
+handa/
+images/
+oracle/
+pretrain_models/
+
+test*.txt

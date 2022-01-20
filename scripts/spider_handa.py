@@ -1,12 +1,14 @@
 import os
 import re
+import sys
 import time
 import logging
 import threading
+import traceback
 from tqdm import tqdm
 from urllib import parse
 from fake_useragent import UserAgent
-from script_utils import repeat_request, load_json, save_json, print_json, setup_logger
+from script_utils import repeat_request, load_json, save_json, print_json, setup_logger, is_valid_file
 
 
 handa_parts = ['B', 'D', 'H', 'L', 'S', 'T', 'W', 'Y', 'HD']
@@ -16,6 +18,8 @@ thread_sema = threading.Semaphore(32)
 result_map_mutex = threading.Lock()
 # 存放爬取结果
 result_map = {part: [] for part in handa_parts}
+global_error_log = setup_logger(
+    'errors', f'handa/global_err_log.txt', 'w', '%(levelname)s: %(message)s', logging.INFO)
 
 
 def get_display_information():
@@ -27,7 +31,7 @@ def get_display_information():
         impress_set = set()
         with open(f'handa/display_files/{part}-Display.aspx', 'r', encoding='utf-8') as fin:
             content = fin.read()
-        reg_res = re.findall(r'<td class="BoneResultItem"><a href="(.*?)".*?>(.*?)</a></td>', content)
+        reg_res = re.findall(r'<td class="BoneResultItem"><a href="([^"]+)"[^>]*>(.*?)</a></td>', content)
         assert len(reg_res) % 4 == 0
         total_len = len(reg_res) // 4
         for idx in range(total_len):
@@ -53,10 +57,12 @@ def get_display_information():
 
 
 def thread_sema_wrapper(target, *args):
-    global thread_sema
+    global thread_sema, global_error_log
     thread_sema.acquire()
     try:
         target(*args)
+    except Exception as err:
+        global_error_log.error(''.join(traceback.format_exception(type(err), err, sys.exc_info()[2])))
     finally:
         thread_sema.release()
 
@@ -75,9 +81,16 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
     book_name, row_order, modern_text, category, url_suf = \
         base_info['book_name'], base_info['row_order'], \
         base_info['modern_text'], base_info['category'], base_info['url']
-    content = repeat_request(parse.urljoin(url_base, url_suf), fake_ua=fake_ua)
-    with open(f'handa/{part}/html/{book_name}-{row_order}.html', 'w', encoding='utf-8') as fout:
-        fout.write(content)
+
+    html_file_name = f'handa/{part}/html/{book_name}-{row_order}.html'
+    if is_valid_file(html_file_name):
+        with open(html_file_name, 'r', encoding='utf-8') as fin:
+            content = fin.read()
+    else:
+        content = repeat_request(parse.urljoin(url_base, url_suf), fake_ua=fake_ua)
+        with open(html_file_name, 'w', encoding='utf-8') as fout:
+            fout.write(content)
+
     if 'MainContent' not in content:
         err_logger.info(f'information not exist:\t{info_id}\t{book_name}\t{row_order}')
         save_result()
@@ -112,11 +125,15 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
 
     l_char_list, r_char_list = [], []
     l_reg_res = re.findall(
-        r'<AREA.*?coords="([0-9,-]+)".*?Word = "(.*?)".*?A="Text".*?Text="(.*?)".*?PureText="(.*?)".*?>', content)
+        r'<AREA shape="[^"]+" coords="([0-9,-]+)" BookName = "[^"]+" RowOrder = "[0-9]+" '
+        r'Word = "([^"]+)" W="[0-9]+" H="[0-9]+" A="Text" Text="([^"]+)" PureText="([^"]+)" >', content)
     r_reg_res = re.findall(
-        r'<AREA.*?coords="([0-9,-]+)".*?Word = "(.*?)".*?A="Img".*?PureText="(.*?)".*?>', content)
-    if len(l_reg_res) != len(r_reg_res) or len(reg_res) == 0:
-        err_logger.info(f'area length error:\t{info_id}\t{book_name}\t{row_order}\t{len(l_reg_res)}\t{len(r_reg_res)}')
+        r'<AREA shape="[^"]+" coords="([0-9,-]+)" BookName = "[^"]+" RowOrder = "[0-9]+" Word = "([^"]+)" '
+        r'W="[0-9]+" H="[0-9]+" A="Img" PureText="([^"]+)" >', content)
+    should_cnt = content.count('<AREA')
+    if len(l_reg_res) != len(r_reg_res) or len(reg_res) == 0 or len(l_reg_res) * 2 != should_cnt:
+        err_logger.info(f'area length error:\t{info_id}\t{book_name}\t{row_order}\t{len(l_reg_res)}'
+                        f'\t{len(r_reg_res)}\t{should_cnt}')
         save_result()
         return
 
@@ -136,8 +153,11 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
         else:
             to_fetch = [l_word]
         for word in to_fetch:
+            word_file_name = f'handa/{part}/characters/{book_name}-{row_order}-{word}'
+            if is_valid_file(word_file_name):
+                continue
             ch_url = f'http://www.chant.org/Bone/BoneImg.aspx?b={book_name}&r={row_order}&w={word}'
-            with open(f'handa/{part}/characters/{book_name}-{row_order}-{word}', 'wb') as fout:
+            with open(word_file_name, 'wb') as fout:
                 fout.write(repeat_request(ch_url, fake_ua=fake_ua, is_content=True))
 
         l_char_list.append({'char': l_txt, 'coords': l_coords, 'img': l_word_name})
@@ -154,12 +174,16 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
         l_img_name, r_img_name = 'missing', 'missing'
     else:
         l_img_name, r_img_name = f'{book_name}-{row_order}-l.jpg', f'{book_name}-{row_order}-r.jpg'
-        img_url1 = f'http://www.chant.org/Bone/{reg_res1[0]}'
-        with open(f'handa/{part}/bones/{l_img_name}', 'wb') as fout:
-            fout.write(repeat_request(img_url1, fake_ua=fake_ua, is_content=True))
-        img_url2 = f'http://www.chant.org/Bone/{reg_res2[0]}'
-        with open(f'handa/{part}/bones/{r_img_name}', 'wb') as fout:
-            fout.write(repeat_request(img_url2, fake_ua=fake_ua, is_content=True))
+        img_file1 = f'handa/{part}/bones/{l_img_name}'
+        if not is_valid_file(img_file1):
+            img_url1 = f'http://www.chant.org/Bone/{reg_res1[0]}'
+            with open(img_file1, 'wb') as fout:
+                fout.write(repeat_request(img_url1, fake_ua=fake_ua, is_content=True))
+        img_file2 = f'handa/{part}/bones/{r_img_name}'
+        if not is_valid_file(img_file2):
+            img_url2 = f'http://www.chant.org/Bone/{reg_res2[0]}'
+            with open(img_file2, 'wb') as fout:
+                fout.write(repeat_request(img_url2, fake_ua=fake_ua, is_content=True))
     result_js['l_bone_img'], result_js['r_bone_img'] = l_img_name, r_img_name
 
     save_result()
@@ -180,14 +204,6 @@ def check_data():
         print(part, count)
     exit()
 
-    with open('handa/H00001-1.html', encoding='utf-8') as fin:
-        content = fin.read()
-    reg_res = re.findall(r'釋文︰<span.*?>(.*?)</span>', content)
-    print(reg_res)
-    for idx in range(len(reg_res[0])):
-        print(idx, reg_res[idx])
-    exit()
-
     meta = load_json('handa/handa600/oracle_meta_1_600.json')
     for dd in meta:
         if dd['book_name'] == 'H00043' and dd['row_order'] == 1:
@@ -205,6 +221,8 @@ def main():
     global handa_parts, result_map
     for part in handa_parts:
         print(f'fetching part {part} ......')
+        if is_valid_file(f'handa/{part}/oracle_meta_{part}.json'):
+            continue
         os.makedirs(f'handa/{part}/bones', exist_ok=True)
         os.makedirs(f'handa/{part}/characters', exist_ok=True)
         os.makedirs(f'handa/{part}/html', exist_ok=True)

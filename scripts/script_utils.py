@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import json
@@ -56,3 +57,7 @@ def setup_logger(logger_name, log_file, log_mode, log_format, log_level) -> logg
     logger.setLevel(log_level)
     logger.addHandler(handler)
     return logger
+
+
+def is_valid_file(path: str):
+    return os.path.exists(path) and os.path.getsize(path) > 0

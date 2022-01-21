@@ -71,6 +71,8 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
     global result_map, result_map_mutex
     # 不论报什么错都要保留基本信息
     result_js = base_info.copy()
+    result_js['l_chars'], result_js['r_chars'] = [], []
+    result_js['l_bone_img'], result_js['r_bone_img'] = 'missing', 'missing'
 
     def save_result():
         result_map_mutex.acquire()
@@ -131,11 +133,9 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
         r'<AREA shape="[^"]+" coords="([0-9,-]+)" BookName = "[^"]+" RowOrder = "[0-9]+" Word = "([^"]+)" '
         r'W="[0-9]+" H="[0-9]+" A="Img" PureText="([^"]+)" >', content)
     should_cnt = content.count('<AREA')
-    if len(l_reg_res) != len(r_reg_res) or len(reg_res) == 0 or len(l_reg_res) * 2 != should_cnt:
+    if len(l_reg_res) != len(r_reg_res) or len(l_reg_res) == 0 or len(l_reg_res) * 2 != should_cnt:
         err_logger.info(f'area length error:\t{info_id}\t{book_name}\t{row_order}\t{len(l_reg_res)}'
                         f'\t{len(r_reg_res)}\t{should_cnt}')
-        save_result()
-        return
 
     for l_res, r_res in zip(l_reg_res, r_reg_res):
         l_coords, l_word, l_txt, l_ch = l_res
@@ -190,6 +190,26 @@ def get_information(info_id: int, base_info: dict, fake_ua: UserAgent, err_logge
 
 
 def check_data():
+    count = {}
+    for part in handa_parts:
+        meta = load_json(f'handa/{part}/oracle_meta_{part}.json')
+        total, with_char, with_img = 0, 0, 0
+        bone_set = set()
+        for doc in meta:
+            total += 1
+            if len(doc['l_chars']) > 0:
+                with_char += 1
+                assert doc['l_bone_img'] != 'missing'
+            if doc['l_bone_img'] != 'missing':
+                with_img += 1
+            bone_set.add(doc['book_name'])
+        count[part] = (total, with_char, with_img, len(bone_set))
+    for key, val in count.items():
+        print(key, val)
+    for i in range(4):
+        print(sum(v[i] for v in count.values()))
+    exit()
+
     for part in handa_parts:
         with open(f'handa/handa500/{part}/err_log_{part}.txt', 'r', encoding='utf-8') as fin:
             lines = fin.readlines()
